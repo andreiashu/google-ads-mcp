@@ -207,6 +207,144 @@ def create_conversion_action(
     }
 
 
+@mcp.tool()
+def add_asset_group_assets(
+    customer_id: str,
+    asset_group_id: str,
+    field_type: str,
+    texts: List[str],
+) -> Dict[str, Any]:
+    """Adds text assets to a Performance Max asset group.
+
+    Creates new text assets and links them to the specified asset group.
+    Use this to add headlines, descriptions, or long headlines to PMax campaigns.
+
+    Args:
+        customer_id: The customer ID (digits only, no hyphens).
+        asset_group_id: The asset group ID to add assets to.
+        field_type: Asset field type. One of: HEADLINE (max 30 chars),
+            LONG_HEADLINE (max 90 chars), DESCRIPTION (max 90 chars),
+            BUSINESS_NAME (max 25 chars).
+        texts: List of text strings for the assets.
+
+    Example:
+        add_asset_group_assets('1234567890', '6665610481', 'HEADLINE',
+            ['Buy With Confidence', 'Pre-Purchase Inspection'])
+    """
+    client = utils.get_googleads_client()
+    asset_service = client.get_service("AssetService")
+    aga_service = client.get_service("AssetGroupAssetService")
+    ag_service = client.get_service("AssetGroupService")
+
+    valid_text_types = {"HEADLINE", "LONG_HEADLINE", "DESCRIPTION", "BUSINESS_NAME"}
+    if field_type not in valid_text_types:
+        return {
+            "success": False,
+            "error": f"field_type must be one of {sorted(valid_text_types)}. "
+            "For image/video assets, use the Google Ads UI.",
+        }
+
+    char_limits = {
+        "HEADLINE": 30,
+        "LONG_HEADLINE": 90,
+        "DESCRIPTION": 90,
+        "BUSINESS_NAME": 25,
+    }
+    limit = char_limits[field_type]
+
+    violations = [
+        f"'{t}' ({len(t)} chars, max {limit})" for t in texts if len(t) > limit
+    ]
+    if violations:
+        return {"success": False, "error": f"Text exceeds limit: {violations}"}
+
+    # Step 1: Create text assets
+    asset_ops = []
+    for text in texts:
+        op = client.get_type("AssetOperation")
+        op.create.text_asset.text = text
+        asset_ops.append(op)
+
+    asset_response = asset_service.mutate_assets(
+        customer_id=customer_id, operations=asset_ops
+    )
+
+    # Step 2: Link assets to asset group
+    asset_group_rn = ag_service.asset_group_path(customer_id, asset_group_id)
+    field_type_enum = getattr(client.enums.AssetFieldTypeEnum, field_type)
+
+    aga_ops = []
+    for result in asset_response.results:
+        op = client.get_type("AssetGroupAssetOperation")
+        op.create.asset_group = asset_group_rn
+        op.create.asset = result.resource_name
+        op.create.field_type = field_type_enum
+        aga_ops.append(op)
+
+    aga_response = aga_service.mutate_asset_group_assets(
+        customer_id=customer_id, operations=aga_ops
+    )
+
+    return {
+        "success": True,
+        "assets_created": len(asset_response.results),
+        "asset_group_assets_linked": len(aga_response.results),
+        "field_type": field_type,
+        "texts": texts,
+        "resource_names": [r.resource_name for r in aga_response.results],
+    }
+
+
+@mcp.tool()
+def remove_asset_group_assets(
+    customer_id: str,
+    asset_group_id: str,
+    asset_ids: List[str],
+    field_type: str,
+) -> Dict[str, Any]:
+    """Removes assets from a Performance Max asset group.
+
+    Unlinks the assets from the asset group. The underlying asset objects
+    are NOT deleted (they may be used elsewhere).
+
+    Args:
+        customer_id: The customer ID (digits only, no hyphens).
+        asset_group_id: The asset group ID.
+        asset_ids: List of asset IDs to remove.
+        field_type: The field type of the asset links (e.g. HEADLINE,
+            DESCRIPTION, LONG_HEADLINE, MARKETING_IMAGE, SQUARE_MARKETING_IMAGE,
+            PORTRAIT_MARKETING_IMAGE, LOGO, LANDSCAPE_LOGO, YOUTUBE_VIDEO,
+            BUSINESS_NAME).
+
+    Example:
+        remove_asset_group_assets('1234567890', '6665610481',
+            ['326135648222', '326135648225'], 'HEADLINE')
+    """
+    client = utils.get_googleads_client()
+    aga_service = client.get_service("AssetGroupAssetService")
+
+    operations = []
+    for asset_id in asset_ids:
+        resource_name = aga_service.asset_group_asset_path(
+            customer_id, asset_group_id, asset_id, field_type
+        )
+        op = client.get_type("AssetGroupAssetOperation")
+        op.remove = resource_name
+        operations.append(op)
+
+    response = aga_service.mutate_asset_group_assets(
+        customer_id=customer_id, operations=operations
+    )
+
+    return {
+        "success": True,
+        "removed_count": len(response.results),
+        "asset_group_id": asset_group_id,
+        "asset_ids": asset_ids,
+        "field_type": field_type,
+    }
+
+
 def _set_proto_field(client, proto_obj, field_path: str, value: str):
     """Sets a value on a protobuf object given a dotted field path.
 
